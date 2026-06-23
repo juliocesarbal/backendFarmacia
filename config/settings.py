@@ -160,9 +160,14 @@ SIMPLE_JWT = {
 # ----------------------------------------------------------------------
 # CORS
 # ----------------------------------------------------------------------
-CORS_ALLOWED_ORIGINS = config(
+_cors_origins = config(
     "CORS_ALLOWED_ORIGINS", default="http://localhost:4200", cast=Csv()
 )
+if "*" in _cors_origins:
+    # django-cors-headers no acepta "*" en la lista; usa el flag dedicado.
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOWED_ORIGINS = _cors_origins
 
 # ----------------------------------------------------------------------
 # drf-spectacular (OpenAPI / Swagger)
