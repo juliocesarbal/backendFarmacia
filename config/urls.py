@@ -1,0 +1,41 @@
+"""URLs raiz del proyecto."""
+from django.conf import settings
+from django.conf.urls.static import static
+from django.contrib import admin
+from django.urls import include, path
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularSwaggerView,
+)
+
+api_v1 = [
+    path("auth/", include("apps.users.urls_auth")),
+    path("", include("apps.users.urls")),
+    path("", include("apps.catalogos.urls")),
+    path("", include("apps.proveedores.urls")),
+    path("", include("apps.inventario.urls")),
+    path("", include("apps.compras.urls")),
+    path("", include("apps.ventas.urls")),
+    path("", include("apps.bajas.urls")),
+    path("", include("apps.ajustes.urls")),
+    path("", include("apps.kardex.urls")),
+    path("", include("apps.importaciones.urls")),
+    path("", include("apps.reportes.urls")),
+    path("", include("apps.analitica.urls")),
+    path("", include("apps.auditoria.urls")),
+]
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/", include(api_v1)),
+    # OpenAPI / Swagger
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path(
+        "api/docs/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger-ui",
+    ),
+]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
