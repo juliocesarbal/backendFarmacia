@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from django.test import TestCase
 
-from apps.catalogos.models import CategoriaProducto, Producto, UnidadMedida
+from apps.catalogo.models import CategoriaProducto, Producto, UnidadMedida
 from apps.inventario.services import (
     crear_capa,
     registrar_entrada,

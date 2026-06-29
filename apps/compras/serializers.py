@@ -1,7 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Compra, DetalleCompra
+from .models import Compra, DetalleCompra, Proveedor
 
 
 class DetalleCompraSerializer(serializers.ModelSerializer):
@@ -17,7 +17,6 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
             "cantidad",
             "costo_unitario",
             "costo_total",
-            "numero_lote",
             "fecha_vencimiento",
             "observacion",
         ]
@@ -53,3 +52,17 @@ class CompraSerializer(serializers.ModelSerializer):
             [DetalleCompra(compra=compra, **det) for det in detalles]
         )
         return compra
+
+
+class ProveedorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Proveedor
+        fields = [
+            "id",
+            "nombre",
+            "nit",
+            "telefono",
+            "correo",
+            "direccion",
+            "estado",
+        ]

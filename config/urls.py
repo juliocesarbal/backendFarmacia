@@ -9,17 +9,14 @@ from drf_spectacular.views import (
 )
 
 api_v1 = [
-    path("auth/", include("apps.users.urls_auth")),
-    path("", include("apps.users.urls")),
-    path("", include("apps.catalogos.urls")),
-    path("", include("apps.proveedores.urls")),
-    path("", include("apps.inventario.urls")),
+    path("auth/", include("apps.seguridad.urls_auth")),
+    path("", include("apps.seguridad.urls")),
+    path("", include("apps.catalogo.urls")),
     path("", include("apps.compras.urls")),
     path("", include("apps.ventas.urls")),
-    path("", include("apps.bajas.urls")),
-    path("", include("apps.ajustes.urls")),
+    path("", include("apps.inventario.urls")),
     path("", include("apps.kardex.urls")),
-    path("", include("apps.importaciones.urls")),
+    path("", include("apps.importacion.urls")),
     path("", include("apps.reportes.urls")),
     path("", include("apps.analitica.urls")),
     path("", include("apps.auditoria.urls")),

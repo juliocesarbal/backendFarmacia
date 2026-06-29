@@ -21,7 +21,7 @@ class SaldoPeriodo(models.Model):
         Periodo, on_delete=models.CASCADE, db_column="idPeriodo"
     )
     producto = models.ForeignKey(
-        "catalogos.Producto", on_delete=models.CASCADE, db_column="idProducto"
+        "catalogo.Producto", on_delete=models.CASCADE, db_column="idProducto"
     )
     saldo_inicial_cantidad = models.DecimalField(
         db_column="saldoInicialCantidad", max_digits=12, decimal_places=2, default=0
@@ -45,7 +45,7 @@ class SaldoPeriodo(models.Model):
 
 class KardexGenerado(models.Model):
     producto = models.ForeignKey(
-        "catalogos.Producto", on_delete=models.CASCADE, db_column="idProducto"
+        "catalogo.Producto", on_delete=models.CASCADE, db_column="idProducto"
     )
     periodo = models.ForeignKey(
         Periodo, on_delete=models.SET_NULL, db_column="idPeriodo", null=True, blank=True
@@ -68,7 +68,7 @@ class KardexGenerado(models.Model):
         db_column="saldoFinalValor", max_digits=14, decimal_places=4, default=0
     )
     usuario = models.ForeignKey(
-        "users.Usuario",
+        "seguridad.Usuario",
         on_delete=models.SET_NULL,
         db_column="idUsuario",
         null=True,

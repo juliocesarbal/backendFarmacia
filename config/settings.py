@@ -36,17 +36,14 @@ THIRD_PARTY_APPS = [
 ]
 
 LOCAL_APPS = [
-    "apps.users",
-    "apps.catalogos",
-    "apps.proveedores",
-    "apps.inventario",
+    "apps.seguridad",
+    "apps.catalogo",
     "apps.compras",
     "apps.ventas",
-    "apps.bajas",
-    "apps.ajustes",
+    "apps.inventario",
     "apps.kardex",
-    "apps.importaciones",
     "apps.reportes",
+    "apps.importacion",
     "apps.analitica",
     "apps.auditoria",
 ]
@@ -100,7 +97,7 @@ DATABASES = {
 # ----------------------------------------------------------------------
 # Usuario personalizado
 # ----------------------------------------------------------------------
-AUTH_USER_MODEL = "users.Usuario"
+AUTH_USER_MODEL = "seguridad.Usuario"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

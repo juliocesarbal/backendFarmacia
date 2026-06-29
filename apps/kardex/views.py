@@ -37,6 +37,28 @@ class KardexProductoView(APIView):
         return Response(kardex)
 
 
+class KardexPorCodigoView(APIView):
+    """CU18: consulta de Kardex por codigo de producto (resuelve a producto_id)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, codigo):
+        from apps.catalogo.models import Producto
+
+        producto = Producto.objects.filter(codigo_producto=codigo).first()
+        if not producto:
+            return Response({"detail": "Producto no encontrado."}, status=404)
+        desde, hasta = _rango(request)
+        kardex = generar_kardex(producto.id, desde, hasta)
+        cap_cant, cap_valor = verificar_saldo_vs_capas(producto.id)
+        kardex["verificacion_capas"] = {
+            "cantidad": cap_cant,
+            "valor": cap_valor,
+            "coincide": cap_cant == kardex["saldo_final_cantidad"],
+        }
+        return Response(kardex)
+
+
 class KardexExcelView(APIView):
     permission_classes = [IsAuthenticated]
 

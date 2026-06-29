@@ -13,7 +13,7 @@ from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
-from apps.catalogos.models import Producto
+from apps.catalogo.models import Producto
 from apps.inventario.models import CapaCosto, MovimientoInventario
 
 from .models import ClusterKMeans, EjecucionKMeans, ProductoCluster

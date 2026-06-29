@@ -13,11 +13,16 @@ dentro de transaction.atomic() (RN-08), responsabilidad de quien invoca.
 """
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
+from django.utils import timezone
 
-from apps.catalogos.models import Producto
+from apps.auditoria.services import registrar_bitacora
+from apps.catalogo.models import Producto
 
 from .models import (
+    AjusteInventario,
+    Baja,
     CapaCosto,
     ConsumoCapaCosto,
     InventarioProducto,
@@ -37,10 +42,7 @@ def stock_disponible(producto_id) -> Decimal:
     return total or Decimal("0")
 
 
-def crear_capa(
-    producto, cantidad, costo_unitario, fecha_ingreso, origen, origen_id=None,
-    numero_lote="", fecha_vencimiento=None,
-):
+def crear_capa(producto, cantidad, costo_unitario, fecha_ingreso, origen):
     """RN-02: una entrada crea una nueva capa de costo independiente."""
     return CapaCosto.objects.create(
         producto=producto,
@@ -49,9 +51,6 @@ def crear_capa(
         costo_unitario=costo_unitario,
         fecha_ingreso=fecha_ingreso,
         origen=origen,
-        origen_id=origen_id,
-        numero_lote=numero_lote or "",
-        fecha_vencimiento=fecha_vencimiento,
     )
 
 
@@ -96,33 +95,6 @@ def consumir_fifo(producto_id, cantidad_solicitada):
     return consumos
 
 
-def consumir_de_capa(capa_id, cantidad_solicitada):
-    """
-    Consume una cantidad de UNA capa concreta (baja/ajuste de un lote especifico,
-    p.ej. baja por vencimiento). No usa FIFO. Lanza StockInsuficienteError si la
-    capa no tiene suficiente disponible.
-    """
-    pendiente = Decimal(str(cantidad_solicitada))
-    capa = CapaCosto.objects.select_for_update().get(pk=capa_id)
-    if capa.estado != "ACTIVA" or capa.cantidad_disponible < pendiente:
-        raise StockInsuficienteError(
-            f"El lote {capa_id} no tiene {pendiente} unidades disponibles."
-        )
-    consumo = [
-        {
-            "capa": capa,
-            "cantidad": pendiente,
-            "costo_unitario": capa.costo_unitario,
-            "costo_total": (pendiente * capa.costo_unitario).quantize(Decimal("0.0001")),
-        }
-    ]
-    capa.cantidad_disponible -= pendiente
-    if capa.cantidad_disponible <= 0:
-        capa.estado = "AGOTADA"
-    capa.save(update_fields=["cantidad_disponible", "estado"])
-    return consumo
-
-
 def _recalcular_inventario(producto):
     """Actualiza el cache InventarioProducto desde las capas activas."""
     capas = CapaCosto.objects.filter(producto=producto, estado="ACTIVA")
@@ -141,17 +113,13 @@ def _recalcular_inventario(producto):
 def registrar_entrada(
     producto, cantidad, costo_unitario, *, tipo, referencia_tipo, referencia_id,
     usuario=None, fecha_ingreso, origen, observacion="", crear_capa_nueva=True,
-    numero_lote="", fecha_vencimiento=None,
 ):
     """
     Registra un movimiento de ENTRADA y, si corresponde, crea su capa de costo.
     Devuelve el MovimientoInventario.
     """
     if crear_capa_nueva:
-        crear_capa(
-            producto, cantidad, costo_unitario, fecha_ingreso, origen, referencia_id,
-            numero_lote=numero_lote, fecha_vencimiento=fecha_vencimiento,
-        )
+        crear_capa(producto, cantidad, costo_unitario, fecha_ingreso, origen)
 
     valor = (Decimal(str(cantidad)) * Decimal(str(costo_unitario))).quantize(Decimal("0.0001"))
     mov = MovimientoInventario.objects.create(
@@ -172,18 +140,14 @@ def registrar_entrada(
 
 def registrar_salida(
     producto, cantidad, *, tipo, referencia_tipo, referencia_id,
-    usuario=None, motivo="", observacion="", capa=None,
+    usuario=None, motivo="", observacion="",
 ):
     """
-    Registra un movimiento de SALIDA. Por defecto valora por FIFO; si se pasa
-    `capa` (id o instancia) consume solo de ese lote (baja por vencimiento, etc.).
-    Persiste los ConsumoCapaCosto. Devuelve (movimiento, costo_total_salida).
+    Registra un movimiento de SALIDA valorado por FIFO (consume las capas mas
+    antiguas primero). Persiste los ConsumoCapaCosto. Devuelve (movimiento,
+    costo_total_salida).
     """
-    if capa is not None:
-        capa_id = capa.id if hasattr(capa, "id") else capa
-        consumos = consumir_de_capa(capa_id, cantidad)
-    else:
-        consumos = consumir_fifo(producto.id, cantidad)
+    consumos = consumir_fifo(producto.id, cantidad)
     costo_total = sum((c["costo_total"] for c in consumos), Decimal("0"))
     costo_unitario_prom = (
         (costo_total / Decimal(str(cantidad))).quantize(Decimal("0.0001"))
@@ -250,3 +214,124 @@ def restaurar_capas(movimiento_salida, *, usuario=None, motivo="Anulacion"):
     )
     _recalcular_inventario(producto)
     return reverso
+
+
+# ---------------------------------------------------------------------------
+# Bajas (RN-03): confirmar consume capas por FIFO
+# ---------------------------------------------------------------------------
+class BajaError(Exception):
+    pass
+
+
+@transaction.atomic
+def confirmar_baja(baja_id, usuario=None):
+    baja = Baja.objects.select_for_update().get(pk=baja_id)
+    if baja.estado != "BORRADOR":
+        raise BajaError(f"La baja ya esta {baja.estado}.")
+
+    detalles = baja.detalles.select_related("producto")
+    if not detalles.exists():
+        raise BajaError("La baja no tiene detalles.")
+
+    # Validacion de stock por linea (FIFO global)
+    for det in detalles:
+        if stock_disponible(det.producto_id) < det.cantidad:
+            raise BajaError(f"Stock insuficiente para {det.producto.nombre}.")
+
+    for det in detalles:
+        try:
+            _, costo_salida = registrar_salida(
+                producto=det.producto,
+                cantidad=det.cantidad,
+                tipo="BAJA",
+                referencia_tipo="BAJA",
+                referencia_id=baja.id,
+                usuario=usuario,
+                motivo=baja.motivo_baja.nombre,
+            )
+        except StockInsuficienteError as e:
+            raise BajaError(str(e))
+        det.costo_total_baja = costo_salida
+        det.save(update_fields=["costo_total_baja"])
+
+    baja.estado = "CONFIRMADA"
+    baja.save(update_fields=["estado"])
+
+    registrar_bitacora(
+        usuario=usuario,
+        modulo="bajas",
+        accion="CONFIRMAR",
+        entidad="Baja",
+        id_entidad=baja.id,
+        valores_nuevos={"estado": "CONFIRMADA"},
+    )
+    return baja
+
+
+# ---------------------------------------------------------------------------
+# Ajustes: POSITIVO crea capa (RN-02); NEGATIVO consume FIFO (RN-03/RN-04)
+# ---------------------------------------------------------------------------
+class AjusteError(Exception):
+    pass
+
+
+@transaction.atomic
+def confirmar_ajuste(ajuste_id, usuario=None):
+    ajuste = AjusteInventario.objects.select_for_update().get(pk=ajuste_id)
+    if ajuste.estado != "BORRADOR":
+        raise AjusteError(f"El ajuste ya esta {ajuste.estado}.")
+
+    detalles = ajuste.detalles.select_related("producto")
+    if not detalles.exists():
+        raise AjusteError("El ajuste no tiene detalles.")
+    if not ajuste.motivo:
+        raise AjusteError("Todo ajuste requiere motivo.")
+
+    if ajuste.tipo_ajuste == "NEGATIVO":
+        for det in detalles:
+            if stock_disponible(det.producto_id) < det.cantidad:
+                raise AjusteError(f"Stock insuficiente para {det.producto.nombre}.")
+
+    for det in detalles:
+        if ajuste.tipo_ajuste == "POSITIVO":
+            costo = det.costo_unitario or det.producto.costo_referencial
+            det.costo_total = (det.cantidad * costo).quantize(Decimal("0.0001"))
+            registrar_entrada(
+                producto=det.producto,
+                cantidad=det.cantidad,
+                costo_unitario=costo,
+                tipo="AJUSTE_POSITIVO",
+                referencia_tipo="AJUSTE",
+                referencia_id=ajuste.id,
+                usuario=usuario,
+                fecha_ingreso=timezone.now().date(),
+                origen="AJUSTE",
+            )
+        else:  # NEGATIVO
+            try:
+                _, costo_salida = registrar_salida(
+                    producto=det.producto,
+                    cantidad=det.cantidad,
+                    tipo="AJUSTE_NEGATIVO",
+                    referencia_tipo="AJUSTE",
+                    referencia_id=ajuste.id,
+                    usuario=usuario,
+                    motivo=ajuste.motivo,
+                )
+            except StockInsuficienteError as e:
+                raise AjusteError(str(e))
+            det.costo_total = costo_salida
+        det.save(update_fields=["costo_total"])
+
+    ajuste.estado = "CONFIRMADO"
+    ajuste.save(update_fields=["estado"])
+
+    registrar_bitacora(
+        usuario=usuario,
+        modulo="ajustes",
+        accion="CONFIRMAR",
+        entidad="AjusteInventario",
+        id_entidad=ajuste.id,
+        valores_nuevos={"estado": "CONFIRMADO", "tipo": ajuste.tipo_ajuste},
+    )
+    return ajuste

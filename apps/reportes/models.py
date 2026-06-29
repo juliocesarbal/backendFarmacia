@@ -11,7 +11,7 @@ class Reporte(models.Model):
         db_column="fechaGeneracion", auto_now_add=True
     )
     usuario = models.ForeignKey(
-        "users.Usuario",
+        "seguridad.Usuario",
         on_delete=models.SET_NULL,
         db_column="idUsuario",
         null=True,
@@ -38,7 +38,7 @@ class DocumentoExportado(models.Model):
         db_column="fechaGeneracion", auto_now_add=True
     )
     usuario = models.ForeignKey(
-        "users.Usuario",
+        "seguridad.Usuario",
         on_delete=models.SET_NULL,
         db_column="idUsuario",
         null=True,

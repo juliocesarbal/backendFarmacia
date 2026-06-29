@@ -9,12 +9,12 @@ from decimal import Decimal
 
 from django.test import TestCase
 
-from apps.catalogos.models import CategoriaProducto, Producto, UnidadMedida
+from apps.catalogo.models import CategoriaProducto, Producto, UnidadMedida
 from apps.compras.models import Compra, DetalleCompra
 from apps.compras.services import CompraError, confirmar_compra
 from apps.inventario.models import CapaCosto, MovimientoInventario
 from apps.inventario.services import stock_disponible
-from apps.proveedores.models import Proveedor
+from apps.compras.models import Proveedor
 
 
 class CompraServiceTests(TestCase):

@@ -11,7 +11,7 @@ class EjecucionKMeans(models.Model):
         db_column="fechaEjecucion", auto_now_add=True
     )
     usuario = models.ForeignKey(
-        "users.Usuario",
+        "seguridad.Usuario",
         on_delete=models.SET_NULL,
         db_column="idUsuario",
         null=True,
@@ -50,7 +50,7 @@ class ProductoCluster(models.Model):
         related_name="productos",
     )
     producto = models.ForeignKey(
-        "catalogos.Producto", on_delete=models.CASCADE, db_column="idProducto"
+        "catalogo.Producto", on_delete=models.CASCADE, db_column="idProducto"
     )
     rotacion = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     consumo_total = models.DecimalField(

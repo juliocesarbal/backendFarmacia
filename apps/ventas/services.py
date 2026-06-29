@@ -1,21 +1,27 @@
 """
-Servicio de ventas: confirmar (FIFO) y anular (restaura capas).
-RN-03, RN-04, RN-06. Todo atomico (RN-08).
+Servicio de ventas — flujo de CAJA FACULTATIVA (v3 §4, §16.6).
+
+Flujo: venta ACTIVA/PENDIENTE_PAGO -> registrar_comprobante -> verificar_pago
+(PAGADA) -> entregar (descuenta inventario por FIFO, ENTREGADA) -> anular.
+
+Regla crítica: NO se descuenta stock al crear la venta ni al registrar el
+comprobante; el descuento ocurre SOLO al entregar, con el pago ya verificado.
+Todo atomico (RN-08); salidas valoradas por FIFO (RN-04).
 """
 from decimal import Decimal
 
 from django.db import transaction
 
 from apps.auditoria.services import registrar_bitacora
+from apps.inventario.models import MovimientoInventario
 from apps.inventario.services import (
     StockInsuficienteError,
     registrar_salida,
     restaurar_capas,
     stock_disponible,
 )
-from apps.inventario.models import MovimientoInventario
 
-from .models import AnulacionBoleta, Venta
+from .models import AnulacionBoleta, ComprobantePago, Venta
 
 
 class VentaError(Exception):
@@ -23,29 +29,86 @@ class VentaError(Exception):
 
 
 @transaction.atomic
-def confirmar_venta(venta_id, usuario=None):
+def registrar_comprobante(venta_id, datos, usuario=None):
+    """Registra el comprobante de la caja facultativa (estado PENDIENTE)."""
+    venta = Venta.objects.select_for_update().get(pk=venta_id)
+    if venta.estado != "ACTIVA":
+        raise VentaError("La venta no esta activa.")
+    if venta.estado_pago == "PAGADA":
+        raise VentaError("La venta ya esta pagada.")
+
+    comprobante = ComprobantePago.objects.create(
+        venta=venta,
+        numero_comprobante=datos.get("numero_comprobante", ""),
+        monto_pagado=datos.get("monto_pagado") or venta.total_venta,
+        observacion=datos.get("observacion", ""),
+        usuario=usuario,
+        estado_verificacion="PENDIENTE",
+    )
+    registrar_bitacora(
+        usuario=usuario, modulo="ventas", accion="REGISTRAR_COMPROBANTE",
+        entidad="Venta", id_entidad=venta.id,
+        valores_nuevos={"comprobante": comprobante.id,
+                        "monto": str(comprobante.monto_pagado)},
+    )
+    return venta
+
+
+@transaction.atomic
+def verificar_pago(venta_id, usuario=None):
+    """Verifica el comprobante pendiente y marca la venta como PAGADA."""
+    venta = Venta.objects.select_for_update().get(pk=venta_id)
+    if venta.estado != "ACTIVA":
+        raise VentaError("La venta no esta activa.")
+    if venta.estado_pago == "PAGADA":
+        raise VentaError("La venta ya esta pagada.")
+
+    comprobante = (
+        venta.comprobantes.filter(estado_verificacion="PENDIENTE")
+        .order_by("-id")
+        .first()
+    )
+    if not comprobante:
+        raise VentaError("No hay comprobante de pago registrado para verificar.")
+    if comprobante.monto_pagado < venta.total_venta:
+        raise VentaError("El monto del comprobante no cubre el total de la venta.")
+
+    comprobante.estado_verificacion = "VERIFICADO"
+    comprobante.save(update_fields=["estado_verificacion"])
+    venta.estado_pago = "PAGADA"
+    venta.save(update_fields=["estado_pago"])
+
+    registrar_bitacora(
+        usuario=usuario, modulo="ventas", accion="VERIFICAR_PAGO",
+        entidad="Venta", id_entidad=venta.id,
+        valores_nuevos={"estado_pago": "PAGADA"},
+    )
+    return venta
+
+
+@transaction.atomic
+def entregar_venta(venta_id, usuario=None):
     """
-    Valida stock por linea, descuenta inventario por FIFO, guarda el costo total
-    de salida de cada detalle y marca la venta como CONFIRMADA.
+    Confirma la entrega SOLO si la venta esta PAGADA. Recien aqui se descuenta el
+    inventario por FIFO y se guarda el costo de salida de cada detalle (RN-04).
     """
     venta = Venta.objects.select_for_update().get(pk=venta_id)
-    if venta.estado != "BORRADOR":
-        raise VentaError(f"La venta ya esta {venta.estado}.")
+    if venta.estado != "ACTIVA":
+        raise VentaError("La venta no esta activa.")
+    if venta.estado_pago != "PAGADA":
+        raise VentaError("No se puede entregar: el pago no esta verificado.")
+    if venta.estado_entrega == "ENTREGADA":
+        raise VentaError("La venta ya fue entregada.")
 
     detalles = venta.detalles.select_related("producto")
     if not detalles.exists():
         raise VentaError("La venta no tiene detalles.")
 
-    # 1. Validar stock de todas las lineas antes de descontar
     for det in detalles:
         if stock_disponible(det.producto_id) < det.cantidad:
-            raise VentaError(
-                f"Stock insuficiente para {det.producto.nombre}."
-            )
+            raise VentaError(f"Stock insuficiente para {det.producto.nombre}.")
 
-    total = Decimal("0")
     for det in detalles:
-        det.subtotal = (det.cantidad * det.precio_unitario).quantize(Decimal("0.0001"))
         try:
             _, costo_salida = registrar_salida(
                 producto=det.producto,
@@ -58,20 +121,15 @@ def confirmar_venta(venta_id, usuario=None):
         except StockInsuficienteError as e:
             raise VentaError(str(e))
         det.costo_total_salida = costo_salida
-        det.save(update_fields=["subtotal", "costo_total_salida"])
-        total += det.subtotal
+        det.save(update_fields=["costo_total_salida"])
 
-    venta.total_venta = total
-    venta.estado = "CONFIRMADA"
-    venta.save(update_fields=["total_venta", "estado"])
+    venta.estado_entrega = "ENTREGADA"
+    venta.save(update_fields=["estado_entrega"])
 
     registrar_bitacora(
-        usuario=usuario,
-        modulo="ventas",
-        accion="CONFIRMAR",
-        entidad="Venta",
-        id_entidad=venta.id,
-        valores_nuevos={"estado": "CONFIRMADA", "total": str(total)},
+        usuario=usuario, modulo="ventas", accion="ENTREGAR",
+        entidad="Venta", id_entidad=venta.id,
+        valores_nuevos={"estado_entrega": "ENTREGADA"},
     )
     return venta
 
@@ -79,32 +137,34 @@ def confirmar_venta(venta_id, usuario=None):
 @transaction.atomic
 def anular_venta(venta_id, motivo="", usuario=None):
     """
-    RN-06: marca la venta ANULADA, crea registro de anulacion, genera
-    movimientos reversos y restaura las capas consumidas. No elimina la venta.
+    Anula la venta. Si ya fue entregada (stock descontado), restaura las capas
+    consumidas (RN-06). No elimina la venta.
     """
     venta = Venta.objects.select_for_update().get(pk=venta_id)
-    if venta.estado != "CONFIRMADA":
-        raise VentaError("Solo se pueden anular ventas confirmadas.")
+    if venta.estado == "ANULADA":
+        raise VentaError("La venta ya esta anulada.")
 
-    movimientos = MovimientoInventario.objects.filter(
-        referencia_tipo="VENTA", referencia_id=venta.id, sentido="SALIDA"
-    )
-    for mov in movimientos:
-        restaurar_capas(mov, usuario=usuario, motivo=f"Anulacion venta {venta.id}")
+    restauro = False
+    if venta.estado_entrega == "ENTREGADA":
+        movimientos = MovimientoInventario.objects.filter(
+            referencia_tipo="VENTA", referencia_id=venta.id, sentido="SALIDA"
+        )
+        for mov in movimientos:
+            restaurar_capas(mov, usuario=usuario, motivo=f"Anulacion venta {venta.id}")
+        venta.estado_entrega = "NO_ENTREGADA"
+        restauro = True
 
     AnulacionBoleta.objects.create(
-        venta=venta, motivo=motivo, usuario=usuario, restaura_stock=True
+        venta=venta, motivo=motivo, usuario=usuario, restaura_stock=restauro
     )
     venta.estado = "ANULADA"
-    venta.save(update_fields=["estado"])
+    venta.save(update_fields=["estado", "estado_entrega"])
 
     registrar_bitacora(
-        usuario=usuario,
-        modulo="ventas",
-        accion="ANULAR",
-        entidad="Venta",
-        id_entidad=venta.id,
-        valores_anteriores={"estado": "CONFIRMADA"},
-        valores_nuevos={"estado": "ANULADA", "motivo": motivo},
+        usuario=usuario, modulo="ventas", accion="ANULAR",
+        entidad="Venta", id_entidad=venta.id,
+        valores_anteriores={"estado": "ACTIVA"},
+        valores_nuevos={"estado": "ANULADA", "motivo": motivo,
+                        "restauro_stock": restauro},
     )
     return venta

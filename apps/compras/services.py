@@ -43,8 +43,6 @@ def confirmar_compra(compra_id, usuario=None):
             usuario=usuario,
             fecha_ingreso=compra.fecha_compra,
             origen="COMPRA",
-            numero_lote=det.numero_lote,
-            fecha_vencimiento=det.fecha_vencimiento,
         )
 
     compra.total_compra = total

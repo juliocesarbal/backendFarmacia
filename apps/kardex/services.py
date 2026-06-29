@@ -11,7 +11,7 @@ from io import BytesIO
 
 from django.db.models import Sum
 
-from apps.catalogos.models import Producto
+from apps.catalogo.models import Producto
 from apps.inventario.models import MovimientoInventario
 
 

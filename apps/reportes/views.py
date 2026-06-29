@@ -1,14 +1,17 @@
 """Reportes consolidados (JSON) por rango de fechas."""
 from datetime import date, timedelta
+from decimal import Decimal
 
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.bajas.models import Baja
+from apps.catalogo.models import Producto
+from apps.inventario.models import AjusteInventario, Baja, CapaCosto
 from apps.compras.models import Compra
-from apps.inventario.models import CapaCosto, InventarioProducto
+from apps.inventario.models import InventarioProducto
 from apps.ventas.models import Venta
 
 from .export import exportar_reporte
@@ -72,12 +75,12 @@ class ReporteVentasView(APIView):
             qs = qs.filter(estado=estado)
         if tipo:
             qs = qs.filter(tipo_venta=tipo)
-        agg = qs.filter(estado="CONFIRMADA").aggregate(
+        agg = qs.filter(estado="ACTIVA", estado_entrega="ENTREGADA").aggregate(
             total=Sum("total_venta"), cantidad=Count("id")
         )
         items = list(
             qs.values("id", "numero_boleta", "fecha_venta", "tipo_venta",
-                      "total_venta", "estado")
+                      "total_venta", "estado", "estado_pago", "estado_entrega")
         )
         formato = request.query_params.get("formato")
         if formato:
@@ -115,6 +118,35 @@ class ReporteBajasView(APIView):
                 ("Estado", "estado"), ("Motivo", "motivo_baja__nombre"),
             ]
             exp = exportar_reporte(formato, "Reporte de bajas", cols, items)
+            if exp:
+                return exp
+        return Response({"desde": desde, "hasta": hasta, "items": items})
+
+
+class ReporteAjustesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        desde, hasta = _rango(request)
+        qs = AjusteInventario.objects.filter(
+            fecha_ajuste__date__gte=desde, fecha_ajuste__date__lte=hasta
+        )
+        estado = request.query_params.get("estado")
+        tipo = request.query_params.get("tipo")
+        if estado:
+            qs = qs.filter(estado=estado)
+        if tipo:
+            qs = qs.filter(tipo_ajuste=tipo)
+        items = list(
+            qs.values("id", "fecha_ajuste", "tipo_ajuste", "estado", "motivo")
+        )
+        formato = request.query_params.get("formato")
+        if formato:
+            cols = [
+                ("#", "id"), ("Fecha", "fecha_ajuste"), ("Tipo", "tipo_ajuste"),
+                ("Estado", "estado"), ("Motivo", "motivo"),
+            ]
+            exp = exportar_reporte(formato, "Reporte de ajustes", cols, items)
             if exp:
                 return exp
         return Response({"desde": desde, "hasta": hasta, "items": items})
@@ -161,86 +193,53 @@ class ReporteInventarioView(APIView):
 
 class ReporteAlertasView(APIView):
     """
-    HU10: detectar vencimientos y stock critico.
-      - por_vencer: lotes (capas activas) que vencen dentro de `dias` (default 30)
-        o ya vencidos.
-      - stock_critico: productos cuyo stock <= umbral (stock_minimo si esta
-        definido, si no STOCK_CRITICO_DEFAULT=5).
+    Detecta stock critico: productos cuyo stock <= umbral (stock_minimo si esta
+    definido, si no STOCK_CRITICO_DEFAULT=5).
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        hoy = date.today()
-        try:
-            dias = int(request.query_params.get("dias", 30))
-        except (TypeError, ValueError):
-            dias = 30
-        limite = hoy + timedelta(days=dias)
-
-        # --- Lotes por vencer / vencidos ---
-        capas = (
-            CapaCosto.objects.filter(
-                estado="ACTIVA",
-                fecha_vencimiento__isnull=False,
-                fecha_vencimiento__lte=limite,
-            )
-            .select_related("producto")
-            .order_by("fecha_vencimiento", "id")
-        )
-        por_vencer = []
-        for c in capas:
-            dias_rest = (c.fecha_vencimiento - hoy).days
-            por_vencer.append(
-                {
-                    "capa_id": c.id,
-                    "producto_id": c.producto_id,
-                    "codigo": c.producto.codigo_producto,
-                    "producto": c.producto.nombre,
-                    "lote": c.numero_lote or f"#{c.id}",
-                    "fecha_vencimiento": c.fecha_vencimiento,
-                    "dias_restantes": dias_rest,
-                    "vencido": dias_rest < 0,
-                    "cantidad_disponible": c.cantidad_disponible,
-                    "costo_unitario": c.costo_unitario,
-                }
-            )
-
-        # --- Stock critico ---
+        # Evalua TODOS los productos activos calculando el stock desde las capas
+        # (igual que el catalogo), no solo los que tienen fila InventarioProducto.
         tipo = request.query_params.get("tipo")
-        inv = InventarioProducto.objects.select_related("producto").filter(
-            producto__estado="ACTIVO"
+        stock_sub = (
+            CapaCosto.objects.filter(producto=OuterRef("pk"), estado="ACTIVA")
+            .values("producto")
+            .annotate(t=Sum("cantidad_disponible"))
+            .values("t")
+        )
+        qs = Producto.objects.filter(estado="ACTIVO").annotate(
+            stock=Coalesce(
+                Subquery(stock_sub, output_field=DecimalField(max_digits=14, decimal_places=2)),
+                Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=2),
+            )
         )
         if tipo:
-            inv = inv.filter(producto__tipo_producto=tipo)
+            qs = qs.filter(tipo_producto=tipo)
         stock_critico = []
-        for i in inv:
-            minimo = i.producto.stock_minimo or 0
+        for p in qs:
+            minimo = p.stock_minimo or 0
             umbral = minimo if minimo > 0 else STOCK_CRITICO_DEFAULT
-            if i.cantidad_actual <= umbral:
+            if p.stock <= umbral:
                 stock_critico.append(
                     {
-                        "producto_id": i.producto_id,
-                        "codigo": i.producto.codigo_producto,
-                        "producto": i.producto.nombre,
-                        "tipo": i.producto.tipo_producto,
-                        "stock": i.cantidad_actual,
+                        "producto_id": p.id,
+                        "codigo": p.codigo_producto,
+                        "producto": p.nombre,
+                        "tipo": p.tipo_producto,
+                        "stock": p.stock,
                         "umbral": umbral,
-                        "agotado": i.cantidad_actual <= 0,
+                        "agotado": p.stock <= 0,
                     }
                 )
         stock_critico.sort(key=lambda x: x["stock"])
 
         return Response(
             {
-                "dias": dias,
-                "por_vencer": por_vencer,
                 "stock_critico": stock_critico,
-                "resumen": {
-                    "por_vencer": len(por_vencer),
-                    "vencidos": sum(1 for p in por_vencer if p["vencido"]),
-                    "stock_critico": len(stock_critico),
-                },
+                "resumen": {"stock_critico": len(stock_critico)},
             }
         )
 

@@ -34,7 +34,7 @@ class BitacoraOperacion(models.Model):
     """Trazabilidad de operaciones criticas (RNF13/RF17)."""
 
     usuario = models.ForeignKey(
-        "users.Usuario",
+        "seguridad.Usuario",
         on_delete=models.SET_NULL,
         db_column="idUsuario",
         null=True,
